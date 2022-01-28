@@ -33,10 +33,10 @@ class Encoder(nn.Module):
         self.incl_win = incl_win
         self.pack = pack
 
-    def rnn_fwd(self, seq, mask, hid):
+    def rnn_fwd(self, seq, mask, hid, enforce_sorted=True):
         if self.pack and mask is not None:
             lengths = mask.sum(-1); #lengths[0] = mask.size(1)
-            seq = pack_padded_sequence(seq, lengths.cpu(), batch_first=True)    
+            seq = pack_padded_sequence(seq, lengths.cpu(), batch_first=True, enforce_sorted=enforce_sorted)    
             seq, hid = self.rnn(seq, hid)
             seq = pad_packed_sequence(seq, batch_first=True)[0]
         else:
@@ -56,7 +56,7 @@ class Encoder(nn.Module):
 
         return out, hid
 
-    def forward(self, seq, mask=None, hid=None):
+    def forward(self, seq, mask=None, hid=None, enforce_sorted=True):
         if self.time_ds > 1:
             ds = self.time_ds
             l = ((seq.size(1) - 3) // ds) * ds
@@ -70,7 +70,7 @@ class Encoder(nn.Module):
             seq = seq.view(seq.size(0), seq.size(1), -1)
             if mask is not None: mask = mask[:, 0:seq.size(1)*4:4]
 
-        seq, hid = self.rnn_fwd(seq, mask, hid) \
+        seq, hid = self.rnn_fwd(seq, mask, hid, enforce_sorted) \
                 if self.incl_win==0 else self.rnn_fwd_incl(seq, mask, hid)
  
         if not self.unidirect:
@@ -122,6 +122,38 @@ class Decoder(nn.Module):
         out = self.output(out)
 
         return out, attn, hid
+
+class SampleTextDecoder(nn.Module):
+    def __init__(self, n_vocab, d_model, n_layer, d_emb=0, dropout=0.2, dropconnect=0., emb_drop=0., pack=True, shared_decoder_embedding=None):
+        super().__init__()
+
+        # Define layers
+        d_emb = d_model if d_emb==0 else d_emb
+        self.emb = nn.Embedding(n_vocab, d_emb, padding_idx=0)
+        self.emb_drop = nn.Dropout(emb_drop)
+        self.scale = d_emb**0.5
+
+        dropout = (0 if n_layer == 1 else dropout)
+        self.lstm = LSTM(d_emb, d_model, n_layer, batch_first=True, dropout=dropout, dropconnect=dropconnect, bidirectional=True)
+        if shared_decoder_embedding: self.emb.weight = shared_decoder_embedding.weight
+        self.pack = pack
+        self.output = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, dec_seq, hid=None):
+        dec_emb = self.emb(dec_seq) * self.scale
+        dec_emb = self.emb_drop(dec_emb)
+        if self.pack and dec_seq.size(0) > 1 and dec_seq.size(1) > 1:
+            lengths = dec_seq.gt(0).sum(-1); #lengths[0] = dec_seq.size(1)
+            dec_in = pack_padded_sequence(dec_emb, lengths.cpu(), batch_first=True, enforce_sorted=False)
+            dec_out, hid = self.lstm(dec_in, hid)
+            dec_out = pad_packed_sequence(dec_out, batch_first=True)[0]
+        else:
+            dec_out, hid = self.lstm(dec_emb, hid)
+
+        hidden_size = dec_out.size(2) // 2
+        dec_out = dec_out[:, :, :hidden_size] + dec_out[:, :, hidden_size:]
+
+        return dec_out, hid
 
 class Seq2Seq(nn.Module):
     def __init__(self, n_vocab=1000, d_input=40, d_enc=320, n_enc=6, d_dec=320, n_dec=2,
@@ -184,3 +216,44 @@ class Seq2Seq(nn.Module):
     def get_logit(self, enc_out, enc_mask, tgt_seq):
         logit = self.decoder(tgt_seq, enc_out, enc_mask)[0]
         return torch.log_softmax(logit, -1)
+
+class Seq2SeqWithSampleRecording(Seq2Seq):
+    def __init__(self, n_vocab=1000, d_input=40, d_enc=320, n_enc=6, d_dec=320, n_dec=2, unidirect=False, incl_win=0, d_emb=0, d_project=0, n_head=8, shared_emb=False, time_ds=1, use_cnn=False, freq_kn=3, freq_std=2, enc_dropout=0.2, enc_dropconnect=0, dec_dropout=0.1, dec_dropconnect=0, emb_drop=0, pack=True):
+        super().__init__(n_vocab, d_input, d_enc, n_enc, d_dec, n_dec, unidirect, incl_win, d_emb, d_project, n_head, shared_emb, time_ds, use_cnn, freq_kn, freq_std, enc_dropout, enc_dropconnect, dec_dropout, dec_dropconnect, emb_drop, pack)
+        self.attn_enhs = MultiHeadedAttention(n_head, d_enc, enc_dropout, residual=True)
+        self.attn_enht = MultiHeadedAttention(n_head, d_dec, dec_dropout, residual=True)
+        self.attn_s = MultiHeadedAttention(n_head, d_enc, enc_dropout, residual=True)
+        self.attn_t = MultiHeadedAttention(n_head, d_dec, dec_dropout, residual=True)
+        self.sample_text_decoder = SampleTextDecoder(n_vocab, d_dec, 1, d_emb=d_emb,
+                            dropout=dec_dropout, dropconnect=dec_dropconnect, emb_drop=emb_drop, pack=pack,
+                            shared_decoder_embedding=self.decoder.emb)
+
+    def forward(self, src_seq, src_mask, tgt_seq, sample_src_seq, sample_src_mask, sample_tgt_seq, encoding=True):
+        if encoding:
+            enc_out, enc_mask = self.encoder(src_seq, src_mask)[0:2]
+        else:
+            enc_out, enc_mask = src_seq, src_mask
+            
+        es, es_mask = self.encoder(sample_src_seq, sample_src_mask, enforce_sorted=False)[0:2]
+        et = self.sample_text_decoder(sample_tgt_seq)[0]
+
+        if True:
+            lt = es.size(1)
+            attn_mask = sample_tgt_seq.eq(0).unsqueeze(1).expand(-1, lt, -1) #tgt_seq?
+            es, _ = self.attn_enhs(es, et, mask=attn_mask)
+
+        # lt = et.size(1)
+        # attn_mask = es_mask.eq(0).unsqueeze(1).expand(-1, lt, -1)
+        # enht, _ = self.attn(et, es, mask=attn_mask)
+
+        lt = enc_out.size(1)
+        attn_mask = es_mask.eq(0).unsqueeze(1).expand(-1, lt, -1) #tgt_seq?
+        enc_out, _ = self.attn_s(enc_out, es, mask=attn_mask)
+        dec_out = self.decoder(tgt_seq, enc_out, enc_mask)[0]
+
+        # lt = et.size(1)
+        # attn_mask = es_mask.eq(0).unsqueeze(1).expand(-1, lt, -1)
+        # enht, _ = self.attn(et, es, mask=attn_mask)
+
+        #return logit.view(-1, logit.size(2))
+        return dec_out, enc_out, enc_mask

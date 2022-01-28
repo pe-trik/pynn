@@ -382,3 +382,104 @@ class SpectroDataset(Dataset):
         tgt = self.collate_tgt(tgt)
 
         return (*src, *tgt)
+
+class SpectroDatasetWithSampleRecording(SpectroDataset):
+    def initialize(self, b_input=20000, b_sample=64):
+        if self.utt_lbl is not None:
+            return
+
+        path = os.path.dirname(self.scp_path)
+        scp_dir = path + '/' if path != '' else ''
+
+        utts = {}
+        for line in smart_open(self.scp_path, 'r'):
+            if line.startswith('#'): continue
+            tokens = line.replace('\n','').split(' ')
+            utt_id, path_pos = tokens[0:2]
+            utt_len = -1 if len(tokens)<=2 else int(tokens[2])
+            path, pos = path_pos.split(':')
+            path = path if path.startswith('/') else scp_dir + path
+            labels = tokens[3:]
+            utts[utt_id] = (utt_id, path, pos, utt_len, *labels)
+ 
+        labels = {}
+        for line in smart_open(self.label_path, 'r'):
+            tokens = line.split()
+            utt_id = tokens[0]
+            if utt_id == '' or utt_id not in utts: continue
+
+            if self.paired_label:
+                sp = tokens.index('|', 1)
+                lb1 = [int(token) for token in tokens[1:sp]]
+                lb1 = [1] + [el+2 for el in lb1] + [2] if self.sek else lb1
+                lb2 = [int(token) for token in tokens[sp+1:]]
+                lb2 = [1] + [el+2 for el in lb2] + [2] if self.sek else lb2
+                lbl = (lb1, lb2)
+            else:
+                lbl = [int(token) for token in tokens[1:]]
+                lbl = [1] + [el+2 for el in lbl] + [2] if self.sek else lbl
+            labels[utt_id] = lbl
+
+        utt_lbl = []
+        for utt_id, utt_info in utts.items():
+            if utt_id not in labels: continue
+            utt_lbl.append([*utt_info, labels[utt_id]])
+
+        #remove speakers with only one utts
+        SPEAKER_COL = 4
+        speakers = {}
+        for utt in utt_lbl:
+            s = utt[SPEAKER_COL]
+            if s in speakers.keys():
+                speakers[s].append(utt)
+            else:
+                speakers[s] = [utt]
+
+        self.utts_by_speakers = dict((s,utts) for s,utts in speakers.items() if len(speakers[s]) > 1)
+        utt_lbl = []
+        for _,items in self.utts_by_speakers.items():
+            utt_lbl += items
+        self.utt_lbl = utt_lbl
+        self.utt_id2index = dict((utt[0], index) for (index, utt) in enumerate(utt_lbl))
+
+        self.print('%d label sequences loaded.' % len(self.utt_lbl))
+        self.print('Creating batches.. ', end='')
+        self.batches = self.create_batch(b_input, b_sample)
+        self.print('Done.')
+        
+        if self.preload:
+            self.print('Loading ark files.. ', end='')
+            self.preload_feats()
+            self.print('Done.')
+
+    def __getitem__(self, index):
+        utt_id, path, pos, _, speaker, lbl  = self.utt_lbl[index]
+        utt_mat = self.read_mat_cache(utt_id, path, pos)
+
+        assert speaker in self.utts_by_speakers.keys()
+        speaker_utts = self.utts_by_speakers[speaker]
+        assert len(speaker_utts) > 1
+        sample = random.randint(0, len(speaker_utts) - 2)
+        if speaker_utts[sample][0] == utt_id:
+            sample = len(speaker_utts) - 1
+        sample_id = speaker_utts[sample][0]
+        sample_utt_id = self.utt_id2index[sample_id]
+        utt_ids, paths, poss, _, _, lbls  = self.utt_lbl[sample_utt_id]
+        utt_mats = self.read_mat_cache(utt_ids, paths, poss)
+        return (utt_mat, lbl, utt_mats, lbls)
+
+    def collate_fn(self, batch):
+        src, tgt, sample_src, sample_tgt = zip(*batch)
+        src = self.augment_src(src)
+        sample_src = self.augment_src(sample_src)
+
+        if self.sort_src or self.pack_src:
+            lst = sorted(zip(src, tgt, sample_src, sample_tgt), key=lambda e : -e[0].shape[0])
+            src, tgt, sample_src, sample_tgt = zip(*lst)
+
+        src = self.collate_src(src) if not self.pack_src else self.collate_src_pack(src)
+        sample_src = self.collate_src(sample_src) if not self.pack_src else self.collate_src_pack(sample_src)
+        tgt = self.collate_tgt(tgt)
+        sample_tgt = self.collate_tgt(sample_tgt)
+
+        return (*src, *tgt, *sample_src, *sample_tgt)
