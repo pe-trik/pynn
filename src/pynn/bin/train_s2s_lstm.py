@@ -16,10 +16,13 @@ from pynn.net.s2s_lstm import Seq2Seq
 from pynn.bin import print_model, train_s2s_model
 
 parser = argparse.ArgumentParser(description='pynn')
-parser.add_argument('--train-scp', help='path to train scp', required=True)
-parser.add_argument('--train-target', help='path to train target', required=True)
-parser.add_argument('--valid-scp', help='path to validation scp', required=True)
-parser.add_argument('--valid-target', help='path to validation target', required=True)
+parser.add_argument('--train-scps', help='path to train scp', required=True)
+parser.add_argument('--train-targets', help='path to train target', required=True)
+parser.add_argument('--valid-scps', help='path to validation scp', required=True)
+parser.add_argument('--valid-targets', help='path to validation target', required=True)
+parser.add_argument('--cs-ratio', help='how much of training data should contain codeswitching', type=float, default=0.0)
+parser.add_argument('--cs-noswitches', help='indexes of transitions not to be generated between datasets', default='')
+parser.add_argument('--cv-cs', help='use codeswitching in cross-validation', action='store_true')
 
 parser.add_argument('--n-classes', type=int, required=True)
 parser.add_argument('--d-enc', type=int, default=320)
