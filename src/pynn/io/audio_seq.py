@@ -5,8 +5,6 @@ import random
 import struct
 import os
 import numpy as np
-from tqdm import tqdm
-from collections import OrderedDict
 
 import torch
 from torch.nn.utils.rnn import pack_sequence
@@ -16,7 +14,8 @@ from torch.utils.data import DataLoader
 from . import smart_open
  
 class SpectroDataset(Dataset):
-    def __init__(self, scp_paths, label_paths=None, paired_label=False,
+    def __init__(self, scp_paths, label_paths=None, use_addinfo=False, paired_label=False,
+                 use_addinfo=False, batch_by=-1,
                  verbose=True, sek=True, sort_src=False, pack_src=False,
                  downsample=1, preload=False, threads=4, fp16=False, 
                  spec_drop=False, spec_bar=2, spec_ratio=0.4,
@@ -25,9 +24,8 @@ class SpectroDataset(Dataset):
         self.label_paths = label_paths.split(',') # path to the label file
         self.paired_label = paired_label
         
-        ## same cv set for all trainings
-        if not time_stretch:
-            random.seed(42)
+        self.use_addinfo = use_addinfo
+        self.batch_by = batch_by
 
         self.downsample = downsample
         self.sort_src = sort_src
@@ -57,156 +55,23 @@ class SpectroDataset(Dataset):
         self.parts = 1
         self.epoch = -1
 
-        self.total_utts = 0
-        self.utt_stats = {}
-        self.scp_sets = {}
-        self.scp_set_length ={}
-        self.total_labels = 0
-        for scp_set in self.scp_paths:
-            self.scp_sets[scp_set.rsplit('/',1)[-1]] = {}
-        self.__load_utts()
-                   
-        self.cs_scp_number = {}
-        for scp_name, _ in self.scp_sets.items():
-            self.cs_scp_number[scp_name] = 0
-      
+        self.addinfo_dct = {}
+        self.__load_addinfos()
 
-
-    def __utt_id_exists(self, utt_id):
-        for scp_set in self.scp_sets: 
-           if utt_id in scp_set:
-               return True
-        return False
-
-    def __load_utts(self):
+    def __load_addinfos(self):
         for scp_path in self.scp_paths:
             path = os.path.dirname(scp_path)
             scp_dir = path + '/' if path != '' else ''
             scp_set = scp_path.rsplit('/',1)[-1]
-            utts = list()
-            for line in smart_open(scp_path, 'r'):
-                if line.startswith('#'): continue
-                tokens = line.replace('\n','').split(' ')
-                utt_id, path_pos = tokens[0:2]
-                utt_len = -1 if len(tokens)<=2 else int(tokens[2])
-                path, pos = path_pos.split(':')
-                if utt_len < 0: utt_len = self._read_length(path, pos, cache=True)
-                path = path if path.startswith('/') else scp_dir + path
-                #utts[utt_id] = (utt_id, path, pos, utt_len)
-                utts.append((utt_id, path, pos, utt_len))
-                self.utt_stats[utt_id] = scp_set
-                self.total_utts += 1
-            #utts =  OrderedDict(sorted(utts.items(), key=lambda item: item[1][3]))
-            #utts = {utt_id: (utt_id, path, pos, utt_len) for utt_id, (utt_id, path, pos, utt_len) in sorted(utts.items(), key=lambda item: item[1][3])}
-            utts = sorted(utts, key=lambda item: item[3])
-            self.scp_sets[scp_set] = utts
-            self.scp_set_length[scp_set] = len(utts)-1
-
-    def __create_cs(self, cs_ratio, cs_noswitch):       
-        no_cs = {}
-        for scp_set, _ in self.scp_sets.items():
-            no_cs[scp_set] = list()
- 
-        if cs_noswitch:
-            no_cs_pairs = cs_noswitch.split(',') #format "0:1,0:2" means no cs from scp_set index 0 to (1 and 2)
-            for cs_pairs in no_cs_pairs:
-                s_scp, to_scp = cs_pairs.split(':')
-                if s_scp in no_cs:
-                    no_cs[s_scp].append(to_scp)
-                else:
-                    no_cs[s_scp] = [to_scp]
-
-
-        five_sec_frames = (((5000-25)//10)+1)
-        ten_sec_frames = (((10000-25)//10)+1)
-        fiveteen_sec_frames = (((15000-25)//10)+1)
-        twenty_sec_frames = (((20000-25)//10)+1)
-        twentyfive_sec_frames = (((25000-25)//10)+1)
-        offset = (((2000-25)//10)+1)  #anzahl frames in 2.05 sec or 2005ms (frames:25ms stride:10ms)
-        length_dict = {0: five_sec_frames, 1: ten_sec_frames, 2: fiveteen_sec_frames, 3: twenty_sec_frames, 4: twentyfive_sec_frames}
-        cs_part = self.total_utts * cs_ratio
-        mono_part = self.total_utts * (1-cs_ratio)
-        mono_count = 0
-        cs_parts = [cs_part*0.25 if key < 3 else cs_part*0.125 for key, time in length_dict.items()]
-        
-        cs_utts = {}
-        self.used_ids = {}
-
-        for key, time in length_dict.items():
-            time_cs_elements = 0
-            scp_set_cut_length = self.scp_set_length.copy()
-            while time_cs_elements < cs_parts[key] and cs_ratio > 0.0:                
-                size = 0
-                scp_set = random.choice(list(self.scp_sets)) #select random scp_set
-                #utt_id = random.choice(list(self.scp_sets[scp_set])) #select random utterance from scp_set
-                utt_idx = random.randint(0, scp_set_cut_length[scp_set])
-                #utt_id = list(self.scp_sets[scp_set].keys())[utt_idx]
-                #utt_id, path, pos, utt_len = self.scp_sets[scp_set][utt_id]
-                utt_id, path, pos, utt_len = self.scp_sets[scp_set][utt_idx]
-                if utt_len < 0: utt_len = self._read_length(path, pos, cache=True)
-                size = utt_len
-
-                if size > time-offset:                   
-		    ## scp_set_length is sorted according to length if idx is too long >idx will be too long as well
-                    scp_set_cut_length[scp_set] = utt_idx -1 
-                    continue
-               
-                ids, utt_infos = list(), list()
-                ids.append(utt_id)
-                utt_infos.append((utt_id, path, pos, utt_len))
-                self.cs_scp_number[scp_set] += 1
-                self.used_ids[utt_id] = 1
-                while size < time-offset:
-                    n_scp_set = random.choice(list(self.scp_sets))
-                    while scp_set==n_scp_set or n_scp_set in no_cs[scp_set]:
-                        n_scp_set = random.choice(list(self.scp_sets))
-                    
-                    #utt_id = random.choice(list(self.scp_sets[n_scp_set]))
-                    #utt_id, path, pos, utt_len = self.scp_sets[n_scp_set][utt_id]
-                    utt_idx = random.randint(0, scp_set_cut_length[scp_set])
-                    utt_id, path, pos, utt_len = self.scp_sets[scp_set][utt_idx]
-                    if utt_len < 0: utt_len = self._read_length(path, pos, cache=True)
-
-                    ids.append(utt_id)
-                    utt_infos.append((utt_id, path, pos, utt_len))
-                    self.cs_scp_number[scp_set] += 1
-                    self.used_ids[utt_id] = 1
-                    scp_set = n_scp_set
-                    size += utt_len
-
-                time_cs_elements += 1
-                cs_utts[tuple(ids)] = utt_infos
-       
-        mono_count = 0
-        for scp_set in self.scp_sets:
-            for utt_infos in self.scp_sets[scp_set]:
-                if utt_infos[0] in self.used_ids: continue 
-                cs_utts[(utt_infos[0],)] = [utt_infos]
-                self.cs_scp_number[scp_set] += 1
-                self.used_ids[utt_infos[0]] = 1             
-                mono_count += 1       
-        
-        while mono_count < mono_part and cs_ratio > 0.0:
-            scp_set = random.choice(list(self.scp_sets))               
-            utt_idx = random.randint(0, len(self.scp_sets[scp_set])-1)
-            utt_id, path, pos, utt_len = self.scp_sets[scp_set][utt_idx]
-            if utt_len < 0: utt_len = self._read_length(path, pos, cache=True)
- 
-            cs_utts[(utt_id,)] = [(utt_id, path, pos, utt_len)]
-            self.cs_scp_number[scp_set] += 1
-            self.used_ids[utt_id] = 1
-            mono_count += 1      
-
-        return cs_utts
-
-    def __make_stats(self, cs_utts):
-        print("Debug: Totel number of utterances befor and after codeswitch: {} -> {} ".format(
-                                                                                        sum([len(scp_set) for _, scp_set in self.scp_sets.items()]) , len(cs_utts)))
-        for scp_name, scp_set in self.scp_sets.items():
-            print("Debug: Number of utts in {}(dataset): {} in percentage: {}".format(scp_name, len(scp_set), (self.cs_scp_number[scp_name]/len(cs_utts)*100)))
-
-
-
+            scp_name = scp_set.split('.')[0]
+            if self.use_addinfo:
+                for line in smart_open(scp_dir+scp_name+'.add_info', 'r'):
+                    tokens = line.replace('\n','').split(' ')
+                    self.addinfo_dct[tokens[0]] = tokens[1:]
+            else:
+                for line in=6 smart_open(scp_set, 'r'):
+                    tokens = line.replace('\n','').split(' ')
+                    self.addinfo_dct[tokens[0]] = []
 
     def partition(self, rank, parts):
         self.rank = rank
@@ -218,58 +83,71 @@ class SpectroDataset(Dataset):
     def print(self, *args, **kwargs):
         if self.verbose: print(*args, **kwargs)
 
-    def get_total_labels(self):
-        return self.total_labels
+    def initialize(self, b_input=20000, b_sample=64):
+        if self.utt_lbl is not None:
+            return
 
-    def initialize(self, b_input=20000, b_sample=64, cs_ratio=0.0, cs_noswitch=''):
-        #if self.utt_lbl is not None:
-        #    return
-        self.total_labels = 0
-        cs_utts = self.__create_cs(cs_ratio, cs_noswitch)
-        self.__make_stats(cs_utts)
+        utts = {}
+        for scp_path in self.scp_paths:
+            path = scp_path
+            scp_dir = path + '/' if path != '' else ''
+            for line in smart_open(scp_path, 'r'):
+                if line.startswith('#'): continue
+                tokens = line.replace('\n','').split(' ')
+                utt_id, path_pos = tokens[0:2]
+                utt_len = -1 if len(tokens)<=2 else int(tokens[2])
+                path, pos = path_pos.split(':')
+                path = path if path.startswith('/') else scp_dir + path
+                if self.addinfo_dct.get(utt_id, None) == None: continue
+                utts[utt_id] = (utt_id, path, pos, utt_len, self.addinfo_dct[utt_id])
 
         labels = {}
-        used_label_paths= list()
+        used_label_paths = list()
         for label_path in self.label_paths:
-         if label_path in used_label_paths: continue
-         used_label_paths.append(label_path)
-         for line in smart_open(label_path, 'r'):
-             tokens = line.split()
-             utt_id = tokens[0]
-          
-             if utt_id == '' or utt_id not in self.used_ids: continue
+            if label_path in used_label_paths: continue
+            used_label_paths.append(label_path)
+            for line in smart_open(label_path, 'r'):
+                tokens = line.split()
+                utt_id = tokens[0]
+                if utt_id == '' or utt_id not in utts: continue
 
-             if self.paired_label:
-                 sp = tokens.index('|', 1)
-                 lb1 = [int(token) for token in tokens[1:sp]]
-                 lb1 = [1] + [el+2 for el in lb1] + [2] if self.sek else lb1
-                 lb2 = [int(token) for token in tokens[sp+1:]]
-                 lb2 = [1] + [el+2 for el in lb2] + [2] if self.sek else lb2
-                 lbl = (lb1, lb2)
-             else:
-                 lbl = [int(token) for token in tokens[1:]]
-                 lbl = [el+2 for el in lbl] if self.sek else lbl
-                 self.total_labels += len(lbl) 
-
-             labels[utt_id] = lbl
+                if self.paired_label:
+                    sp = tokens.index('|', 1)
+                    lb1 = [int(token) for token in tokens[1:sp]]
+                    lb1 = [1] + [el+2 for el in lb1] + [2] if self.sek else lb1
+                    lb2 = [int(token) for token in tokens[sp+1:]]
+                    lb2 = [1] + [el+2 for el in lb2] + [2] if self.sek else lb2
+                    lbl = (lb1, lb2)
+                else:
+                    lbl = [int(token) for token in tokens[1:]]
+                    lbl = [1] + [el+2 for el in lbl] + [2] if self.sek else lbl
+                labels[utt_id] = lbl
 
         utt_lbl = []
-        not_loaded_labels = 0
-        for utt_ids, utt_infos in cs_utts.items():
-            if any(utt_id not in labels for utt_id in utt_ids):
-                not_loaded_labels += 1
-                continue
+        batch_utts = {}
+        for utt_id, utt_info in utts.items():
+            if utt_id not in labels: continue
+            utt_lbl.append([*utt_info, labels[utt_id]])
+            if self.batch_by != -1:
+                batch_by_inf = utt_info[4][self.batch_by]
+                if batch_by_inf in batch_utts:
+                    batch_utts[batch_by_inf].append([*utt_info, labels[utt_id]])
+                else:
+                    batch_utts[batch_by_inf] = [[*utt_info, labels[utt_id]]]
 
-            lbls = [1] + [lbls for utt_id in utt_ids for lbls in labels[utt_id]] + [2]
-            utt_lbl.append([[*utt_infos], lbls])
-
-        print("Labels not found #{}".format(not_loaded_labels))
         self.utt_lbl = utt_lbl
         self.print('%d label sequences loaded.' % len(self.utt_lbl))
         self.print('Creating batches.. ', end='')
-        self.batches = self.create_batch(b_input, b_sample)
-        self.print('Done.')
-        
+        self.batches = []
+        if batch_utts:
+            for batched_by, batch_items in batch_utts.items():
+                self.batches += self.create_batch(b_input, b_sample, batch_items)
+        else:
+            self.batches = self.create_batch(b_input, b_sample)
+
+
+        self.print('Done.')   
+     
         if self.preload:
             self.print('Loading ark files.. ', end='')
             self.preload_feats()
@@ -288,15 +166,15 @@ class SpectroDataset(Dataset):
                             num_workers=self.threads, pin_memory=False)
         return loader
 
-    def create_batch(self, b_input, b_sample):
-        complex_utts = self.utt_lbl
-              
+    def create_batch(self, b_input, b_sample, batched_by=None):
+        utts = batched_by if batched_by else self.utt_lbl
+
+        for utt in utts:
+            path, pos, utt_len = utt[1:4]
+            if utt_len < 0: utt[3] = self._read_length(path, pos, cache=True)
         self._close_ark_files()
-     
-        lst = list()
-        for j, (utt_infos, _) in enumerate(complex_utts):
-            complex_length = sum([utt[3] for utt in utt_infos])
-            lst.append((j, complex_length))
+
+        lst = [(j, utt[3]) for j, utt in enumerate(utts)]
         lst = sorted(lst, key=lambda e : e[1])
 
         s, j, step = 0, 4, 4
@@ -307,10 +185,11 @@ class SpectroDataset(Dataset):
                 j += step
                 continue
             if bs > 8: j = s + (bs // 8) * 8
-            batches.append([idx for idx, _ in lst[s:j]])
+            batches.append([idx+self.batch_num_offset for idx, _ in lst[s:j]])
             s = j
             j += step
-        if s < len(lst): batches.append([idx for idx, _ in lst[s:]])
+        if s < len(lst): batches.append([idx+self.batch_num_offset for idx, _ in lst[s:]])
+        self.batch_num_offset += len(lst)
         return batches
 
     def preload_feats(self):
@@ -387,16 +266,9 @@ class SpectroDataset(Dataset):
         return len(self.utt_lbl)
 
     def __getitem__(self, index):
-        utt_infos, lbl = self.utt_lbl[index]
-        utt_mat = np.array([])
-        for utt_info in utt_infos:
-            if utt_mat.size == 0:
-                utt_mat = self.read_mat_cache(*utt_info[0:3])
-            else:
-                new_utt_mat = self.read_mat_cache(*utt_info[0:3])
-                utt_mat = np.concatenate((utt_mat, new_utt_mat), axis=0)
-
-        return (utt_mat, lbl)
+        utt_id, path, pos, _, addinfos, lbl  = self.utt_lbl[index]
+        utt_mat = self.read_mat_cache(utt_id, path, pos)
+        return (utt_mat, lbl, addinfos)
 
     def read_mat_cache(self, utt_id, path, pos):
         cache = self.ark_cache
@@ -433,7 +305,6 @@ class SpectroDataset(Dataset):
         src = self.collate_src(src)
         return (*src, ids)
 
-    #TODO self.label_path determine when used and how to adapt for code-switching
     def read_label(self, utt_id):
         if self.lbl_dic is None:
             lbl_dic = {}
@@ -543,7 +414,7 @@ class SpectroDataset(Dataset):
         return (*labels,) 
 
     def collate_fn(self, batch):
-        src, tgt = zip(*batch)
+        src, tgt, addinfos = zip(*batch)
         src = self.augment_src(src)
 
         if self.sort_src or self.pack_src:
@@ -552,5 +423,5 @@ class SpectroDataset(Dataset):
 
         src = self.collate_src(src) if not self.pack_src else self.collate_src_pack(src)
         tgt = self.collate_tgt(tgt)
-            
-        return (*src, *tgt)
+
+        return (*src, *tgt, addinfos)
