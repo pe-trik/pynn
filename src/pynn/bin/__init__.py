@@ -1,6 +1,7 @@
 # Copyright 2019 Thai-Son Nguyen
 # Licensed under the Apache License, Version 2.0 (the "License")
 
+from ast import arg
 from pynn.io.audio_seq import SpectroDataset
 from pynn.io.text_seq import TextSeqDataset, TextPairDataset
 from pynn.trainer.adam_s2s import train_model as train_s2s
@@ -18,16 +19,19 @@ def print_model(model):
     
 def train_s2s_model(model, args, device, n_device=1):
     dist, verbose = n_device > 1, device == 0
-    tr_data = SpectroDataset(args.train_scps, args.train_targets, downsample=args.downsample,
+    tr_data = SpectroDataset(args.train_scps, args.train_targets, downsample=args.downsample, 
+                             batch_by=args.batch_by, use_addinfo=args.use_addinfo,
                              sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,
                              spec_drop=args.spec_drop, spec_bar=args.spec_bar, spec_ratio=args.spec_ratio,
                              time_stretch=args.time_stretch, time_win=args.time_win,
                              fp16=args.fp16, preload=args.preload, threads=2, verbose=verbose)
     cv_data = {}
     for valid_scp in args.valid_scps.split(','):
-        cv_data[valid_scp] = SpectroDataset(valid_scp, args.valid_targets, downsample=args.downsample,
-                             sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,
-                             fp16=args.fp16, preload=args.preload, threads=2, verbose=verbose)
+        if len(valid_scp.strip()) > 0:
+            cv_data[valid_scp] = SpectroDataset(valid_scp, args.valid_targets, downsample=args.downsample,
+                                batch_by=args.batch_by, use_addinfo=args.use_addinfo,
+                                sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,
+                                fp16=args.fp16, preload=args.preload, threads=2, verbose=verbose)
     if args.cv_cs:
         cv_data["codeswitch"] = SpectroDataset(args.valid_scps, args.valid_targets, downsample=args.downsample,
                              sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,

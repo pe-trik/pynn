@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from pynn.util import save_object_param
-from pynn.net.s2s_lstm import Seq2Seq
+from pynn.net.s2s_lstm import Seq2SeqWithAdapters
 from pynn.bin import print_model, train_s2s_model
 
 parser = argparse.ArgumentParser(description='pynn')
@@ -22,6 +22,7 @@ parser.add_argument('--valid-scps', help='path to validation scp', required=True
 parser.add_argument('--valid-targets', help='path to validation target', required=True)
 parser.add_argument('--use-addinfo', help='specify if using .add_info, , expected to be in scp dir', action='store_true')
 parser.add_argument('--batch-by', help='index after which addinfo should be batched', type=int, default=-1)
+parser.add_argument('--cv-cs', help='use codeswitching in cross-validation', action='store_true')
 
 parser.add_argument('--n-classes', type=int, required=True)
 parser.add_argument('--d-enc', type=int, default=320)
@@ -75,6 +76,10 @@ parser.add_argument('--b-sync', help='steps per update', type=int, default=0)
 parser.add_argument('--lr', help='learning rate', type=float, default=0.002)
 parser.add_argument('--grad-norm', help='divide gradient by updated tokens', action='store_true')
 parser.add_argument('--fp16', help='fp16 or not', action='store_true')
+parser.add_argument('--d_adapter', type=int, default=64)
+parser.add_argument('--adapter_names', nargs='+')
+parser.add_argument('--ignore-batch-label', help='ignores batch label', action='store_true')
+parser.add_argument('--grad-clip', help='gradient clippng; 0. is disabled', type=float, default=0.)
 
 def create_model(args, device):
     params = {
@@ -98,8 +103,10 @@ def create_model(args, device):
         'enc_dropconnect': args.enc_dropconnect,
         'dec_dropout': args.dec_dropout,
         'dec_dropconnect': args.dec_dropconnect,
-        'emb_drop': args.emb_drop}
-    model = Seq2Seq(**params)
+        'emb_drop': args.emb_drop,
+        'd_adapter': args.d_adapter,
+        'adapter_names': args.adapter_names}
+    model = Seq2SeqWithAdapters(**params)
     save_object_param(model, params, args.model_path+'/model.cfg')
     return model
 

@@ -7,6 +7,7 @@ from turtle import forward
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 def _weight_drop(module, weights, dropout):
     for name_w in weights:
@@ -51,35 +52,35 @@ class Adapter(nn.Module):
         x = x + self.up_projection(d)
         return self.norm(x)
 
-class LSTWithAdapters(nn.Module):
-    def __init__(self,  *args, hidden_size = 1024, dropconnect=0.0, num_layers=1, dropout=0.0, d_adapter=64, adapter_names=[], **kwargs):
+class LSTMWithAdapters(nn.Module):
+    def __init__(self,  *args, input_size=1024, hidden_size = 1024, dropconnect=0.0, num_layers=1, dropout=0.0, d_adapter=64, adapter_names=[], **kwargs):
         super().__init__()
-        self.layers = []
-        self.adapters = []
+        self.layers = nn.ModuleList()
+        self.adapters = nn.ModuleList()
         for _ in range(num_layers):
-            self.layers.append(LSTM(*args,hidden_size=hidden_size, dropconnect=dropconnect, **kwargs))
-            adapters = {}
+            self.layers.append(LSTM(*args,input_size=input_size, hidden_size=hidden_size, dropconnect=dropconnect, **kwargs))
+
+            input_size = 2 * hidden_size if kwargs['bidirectional'] else hidden_size
+            adapters = nn.ModuleDict()
             for a in adapter_names:
-                adapters[a] = Adapter(hidden_size, d_adapter)
+                adapters[a] = Adapter(input_size, d_adapter)
             self.adapters.append(adapters)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, adapter_name, mask=None, hid=None):
+    def forward(self, x, adapter_name, mask=None, hid=None, enforce_sorted=True):
         was_packed = isinstance(x, nn.utils.rnn.PackedSequence)
-
-        for idx, l, la in enumerate(zip(self.layers, self.adapters)):
-            if was_packed and not isinstance(x, nn.utils.rnn.PackedSequence):
-                lengths = mask.sum(-1); #lengths[0] = mask.size(1)
-                x = torch._pack_padded_sequence(x, lengths.cpu(), batch_first=True)    
+        lengths = None
+        for idx, (l, la) in enumerate(zip(self.layers, self.adapters)):
+            if was_packed:
                 x, hid = l(x, hid)
-                x = torch._pad_packed_sequence(x, batch_first=True)[0]
+                x, lengths = pad_packed_sequence(x, batch_first=True)
             else:
                 x, hid = l(x, hid)
             if idx + 1 < len(self.layers): #drop out except for the last layer
                 x = self.dropout(x)
             a = la[adapter_name]
             x = a(x)
-        if was_packed:
-            lengths = mask.sum(-1); #lengths[0] = mask.size(1)
-            x = torch._pack_padded_sequence(x, lengths.cpu(), batch_first=True)    
+            if was_packed:
+                #lengths = mask.sum(-1); #lengths[0] = mask.size(1)
+                x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=enforce_sorted)    
         return x, hid

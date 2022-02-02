@@ -14,14 +14,13 @@ from torch.utils.data import DataLoader
 from . import smart_open
  
 class SpectroDataset(Dataset):
-    def __init__(self, scp_paths, label_paths=None, use_addinfo=False, paired_label=False,
-                 use_addinfo=False, batch_by=-1,
+    def __init__(self, scp_paths, label_paths=None, use_addinfo=False, paired_label=False, batch_by=-1,
                  verbose=True, sek=True, sort_src=False, pack_src=False,
                  downsample=1, preload=False, threads=4, fp16=False, 
                  spec_drop=False, spec_bar=2, spec_ratio=0.4,
                  time_stretch=False, time_win=10000, mean_sub=False, var_norm=False):
-        self.scp_paths = scp_paths.split(',')     # path to the .scp file
-        self.label_paths = label_paths.split(',') # path to the label file
+        self.scp_paths = [p.strip() for p in scp_paths.split(',') if len(p.strip()) > 0]     # path to the .scp file
+        self.label_paths = [p.strip() for p in label_paths.split(',') if len(p.strip()) > 0] # path to the label file
         self.paired_label = paired_label
         
         self.use_addinfo = use_addinfo
@@ -65,11 +64,12 @@ class SpectroDataset(Dataset):
             scp_set = scp_path.rsplit('/',1)[-1]
             scp_name = scp_set.split('.')[0]
             if self.use_addinfo:
-                for line in smart_open(scp_dir+scp_name+'.add_info', 'r'):
+                info_file = os.path.join(scp_dir, f"{scp_name}.add_info")
+                for line in smart_open(info_file, 'r'):
                     tokens = line.replace('\n','').split(' ')
-                    self.addinfo_dct[tokens[0]] = tokens[1:]
+                    self.addinfo_dct[tokens[0]] = [t.lower() for t in tokens[1:]]
             else:
-                for line in=6 smart_open(scp_set, 'r'):
+                for line in smart_open(scp_set, 'r'):
                     tokens = line.replace('\n','').split(' ')
                     self.addinfo_dct[tokens[0]] = []
 
@@ -90,6 +90,7 @@ class SpectroDataset(Dataset):
         utts = {}
         for scp_path in self.scp_paths:
             path = scp_path
+            path = os.path.dirname(path)
             scp_dir = path + '/' if path != '' else ''
             for line in smart_open(scp_path, 'r'):
                 if line.startswith('#'): continue
@@ -102,10 +103,10 @@ class SpectroDataset(Dataset):
                 utts[utt_id] = (utt_id, path, pos, utt_len, self.addinfo_dct[utt_id])
 
         labels = {}
-        used_label_paths = list()
+        used_label_paths = set()
         for label_path in self.label_paths:
             if label_path in used_label_paths: continue
-            used_label_paths.append(label_path)
+            used_label_paths.add(label_path)
             for line in smart_open(label_path, 'r'):
                 tokens = line.split()
                 utt_id = tokens[0]
@@ -139,8 +140,9 @@ class SpectroDataset(Dataset):
         self.print('%d label sequences loaded.' % len(self.utt_lbl))
         self.print('Creating batches.. ', end='')
         self.batches = []
-        if batch_utts:
-            for batched_by, batch_items in batch_utts.items():
+        self.batch_num_offset = 0
+        if len(batch_utts.keys()) > 0:
+            for _, batch_items in batch_utts.items():
                 self.batches += self.create_batch(b_input, b_sample, batch_items)
         else:
             self.batches = self.create_batch(b_input, b_sample)

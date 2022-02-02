@@ -11,7 +11,7 @@ from . import EpochPool, ScheduledOptim
 from . import cal_ce_loss, load_last_chkpt, save_last_chkpt
 
 def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
-                teacher_force=1., weight_noise=False, grad_clip=0., grad_norm=False, fp16=False):
+                teacher_force=1., weight_noise=False, grad_clip=0., grad_norm=False, fp16=False, ignore_batch_label=False):
     ''' Epoch operation in training phase'''
     model.train()
     
@@ -23,14 +23,14 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
     num_labels = 0
 
     data_len = len(data)
-    total_labels = data.get_total_labels()
     loader = data.create_loader()
     opt.zero_grad()
     for batch_i, batch in enumerate(loader):
         # prepare data
         #if batch_i > 10:
         #    break
-
+        label = "shared" if ignore_batch_label else batch[-1][0][0]
+        batch = batch[:-1]
         src_seq, src_mask, tgt_seq = map(lambda x: x.to(device), batch)      
 
         num_labels += (tgt_seq.count_nonzero() - (tgt_seq.size(0)*2))
@@ -38,10 +38,6 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
         tgt_seq = tgt_seq[:, :-1]
         last = (batch_i == data_len)
         n_seq += tgt_seq.size(0)
- 
-       
-        
-        #total_labels = data.get_total_labels()
         
         try:
             # forward
@@ -52,7 +48,7 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
                 # teacher forcing or sampling
                 sampling = teacher_force < 1.
                 if sampling:
-                    pred, src_seq, src_mask = model(src_seq, src_mask, tgt_seq)            
+                    pred, src_seq, src_mask = model(src_seq, src_mask, tgt_seq, label)            
                     pred = torch.argmax(pred, dim=-1).detach()
                     sample = pred.clone().bernoulli_(1. - teacher_force)
                     pred = pred * sample
@@ -60,11 +56,11 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
                     pred = pred * tgt_seq.gt(2).type(pred.dtype)
                     tgt_seq = tgt_seq * pred.eq(0).type(pred.dtype) + pred
 
-                pred = model(src_seq, src_mask, tgt_seq, encoding=not sampling)[0]
+                pred = model(src_seq, src_mask, tgt_seq, label, encoding=not sampling)[0]
                 pred = pred.view(-1, pred.size(2))
                 loss, loss_data, n_correct, n_token = cal_ce_loss(pred, gold, eps)
                 if torch.isnan(loss.data):
-                    print("    inf loss at %d" % n_seq); continue
+                    print(f"    inf loss at {n_seq} with batch label {label}"); continue
             # backward
             opt.backward(loss)
         except RuntimeError as err:
@@ -95,21 +91,11 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
             prints += n_print
             p_loss, p_token, p_correct = 0., 0, 0
 
-
-        if num_labels > total_labels:
-            if updates != 0:
-                norm = updates if grad_norm else 1
-                opt.step_and_update_lr(grad_clip, norm)
-                opt.zero_grad()
-                updates, steps = 0, 0
-            break
-
-    print("{}/{} tokens seen out of total".format(num_labels, total_labels))    
     loss_per_token = total_loss / n_token_total
     accuracy = n_token_correct / n_token_total
     return loss_per_token, accuracy
 
-def eval_epoch(model, data, device, fp16=False):
+def eval_epoch(model, data, device, fp16=False, ignore_batch_label=False):
     ''' Epoch operation in evaluation phase '''
     model.eval()
 
@@ -120,13 +106,15 @@ def eval_epoch(model, data, device, fp16=False):
     with torch.no_grad():
         for batch_i, batch in enumerate(loader):
             # prepare data
+            label = "shared" if ignore_batch_label else batch[-1][0][0]
+            batch = batch[:-1]
             src_seq, src_mask, tgt_seq = map(lambda x: x.to(device), batch)
             gold = tgt_seq[:, 1:]
             tgt_seq = tgt_seq[:, :-1]
 
             # forward
             with autocast(enabled=fp16):
-                pred = model(src_seq, src_mask, tgt_seq)[0]
+                pred = model(src_seq, src_mask, tgt_seq, label)[0]
                 loss, loss_data, n_correct, n_token = cal_ce_loss(pred, gold)
                 if torch.isnan(loss.data):
                     print("    inf loss at batch %d" % batch_i); continue
@@ -162,7 +150,13 @@ def train_model(model, datasets, epochs, device, cfg, args, fp16=False, dist=Fal
     opt = ScheduledOptim(n_warmup, n_const, lr)
     model_opt = opt.initialize(model, device, weight_decay=weight_decay, dist=dist)
 
+    test = False
+
     tr_data, cv_data = datasets
+    if test:
+        tr_data = [d for _,d in list(cv_data.items())[:1]][0]
+        cv_data = dict(list(cv_data.items())[:1])
+    
     pool = EpochPool(n_save)
     epoch_i, _ = load_last_chkpt(model_path, model, opt)
     
@@ -173,13 +167,14 @@ def train_model(model, datasets, epochs, device, cfg, args, fp16=False, dist=Fal
             v.initialize(b_input, b_sample, 1.0)
 
     while epoch_i < epochs:
-        tr_data.initialize(b_input, b_sample, args.cs_ratio, args.cs_noswitches)
+        tr_data.initialize(b_input, b_sample)
         tr_data.set_epoch(epoch_i)
         epoch_i += 1 
         if n_print > 0: print('[ Epoch', epoch_i, ']')
         start = time.time()
         tr_loss, tr_accu = train_epoch(model_opt, tr_data, opt, eps, device, b_update, b_sync, n_print,
-                                       teacher_force, weight_noise, grad_norm=grad_norm, fp16=fp16)
+                                       teacher_force, weight_noise, grad_norm=grad_norm, fp16=fp16, ignore_batch_label=args.ignore_batch_label,
+                                       grad_clip=args.grad_clip)
         if dist and device > 0: continue
         print('  (Training)   ppl: {:8.5f}, accuracy: {:3.3f} %, elapse: {:3.3f} min'.format(
                  math.exp(min(tr_loss, 100)), 100*tr_accu, (time.time()-start)/60))
@@ -187,10 +182,12 @@ def train_model(model, datasets, epochs, device, cfg, args, fp16=False, dist=Fal
         total_cv_loss = 0
         for k, v in cv_data.items():
             start = time.time()
-            cv_loss, cv_accu = eval_epoch(model_opt, v, device, fp16=fp16)
+            cv_loss, cv_accu = eval_epoch(model_opt, v, device, fp16=fp16, ignore_batch_label=args.ignore_batch_label)
             print('  (Validation) {} ppl: {:8.5f}, accuracy: {:3.3f} %, elapse: {:3.3f} min'.format(
                      k, math.exp(min(cv_loss, 100)), 100*cv_accu, (time.time()-start)/60))
             total_cv_loss += cv_loss
+        
+        assert not test
 
         if math.isnan(total_cv_loss): continue
         model_file = model_path + '/epoch-{}.pt'.format(epoch_i)
