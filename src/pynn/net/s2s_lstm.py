@@ -1,9 +1,5 @@
 # Copyright 2019 Thai-Son Nguyen
 # Licensed under the Apache License, Version 2.0 (the "License")
-
-import random
-from unicodedata import bidirectional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +7,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from . import freeze_module
 from . import XavierLinear, Swish
-from .rnn import LSTM, LSTMWithAdapters
+from .rnn import LSTM, LSTMWithAdaptersWithPrameterGenerator
 from .attn import MultiHeadedAttention
 
 class Encoder(nn.Module):
@@ -191,7 +187,7 @@ class EncoderWithAdapters(Encoder):
         super().__init__(d_input, d_model, n_layer, unidirect, incl_win, dropout, dropconnect, time_ds, use_cnn, freq_kn, freq_std, pack)
         if use_cnn:
             d_input = ((((d_input - freq_kn) // freq_std + 1) - freq_kn) // freq_std + 1)*32
-        self.rnn = LSTMWithAdapters(input_size=d_input, hidden_size=d_model, num_layers=n_layer, batch_first=True,
+        self.rnn = LSTMWithAdaptersWithPrameterGenerator(input_size=d_input, hidden_size=d_model, num_layers=n_layer, batch_first=True,
                         bidirectional=(not unidirect), bias=False, dropout=dropout, dropconnect=dropconnect, d_adapter=d_adapter, adapter_names=adapter_names)
 
     def rnn_fwd(self, seq, adapter_name, mask, hid):
@@ -234,7 +230,7 @@ class EncoderWithAdapters(Encoder):
 class DecoderWithAdapters(Decoder):
     def __init__(self, n_vocab, d_model, n_layer, d_enc, d_adapter, d_emb=0, d_project=0, n_head=8, shared_emb=True, dropout=0.2, dropconnect=0, emb_drop=0, pack=True, adapter_names=[]):
         super().__init__(n_vocab, d_model, n_layer, d_enc, d_emb, d_project, n_head, shared_emb, dropout, dropconnect, emb_drop, pack)
-        self.lstm = LSTMWithAdapters(input_size=d_emb, hidden_size=d_model, num_layers=n_layer, batch_first=True,
+        self.lstm = LSTMWithAdaptersWithPrameterGenerator(input_size=d_emb, hidden_size=d_model, num_layers=n_layer, batch_first=True,
                         dropout=dropout, dropconnect=dropconnect, d_adapter=d_adapter, adapter_names=adapter_names, bidirectional=False)
 
     def forward(self, dec_seq, enc_out, enc_mask, adapter_name, hid=None):
@@ -270,6 +266,7 @@ class Seq2SeqWithAdapters(nn.Module):
         self.decoder = DecoderWithAdapters(n_vocab, d_dec, n_dec, d_enc,
                             n_head=n_head, d_emb=d_emb, d_project=d_project, shared_emb=shared_emb,
                             dropout=dec_dropout, dropconnect=dec_dropconnect, emb_drop=emb_drop, pack=pack, d_adapter=d_adapter, adapter_names=adapter_names)
+        self.decoder.lstm.adapters.embedding.weight = self.encoder.rnn.adapters.embedding.weight
 
     def forward(self, src_seq, src_mask, tgt_seq, adapter_name, encoding=True):
         if encoding:

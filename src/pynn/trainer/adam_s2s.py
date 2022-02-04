@@ -25,6 +25,7 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
     data_len = len(data)
     loader = data.create_loader()
     opt.zero_grad()
+    label = ''
     for batch_i, batch in enumerate(loader):
         # prepare data
         #if batch_i > 10:
@@ -65,7 +66,7 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
             opt.backward(loss)
         except RuntimeError as err:
             if 'CUDA out of memory' in str(err):
-                print('    WARNING: ran out of memory on GPU at %d' % n_seq)
+                print(f'    WARNING: ran out of memory on GPU at {n_seq}')
                 torch.cuda.empty_cache(); continue
             raise err
 
@@ -87,7 +88,7 @@ def train_epoch(model, data, opt, eps, device, b_update, b_sync, n_print,
             ppl = math.exp(min(p_loss/p_token, 100))
             pred = p_correct * 1. / p_token
             print('    Seq: {:6d}, lr: {:.7f}, ppl: {:9.4f}, '\
-                  'updates: {:6d}, correct: {:.2f}'.format(n_seq, opt.lr, ppl, opt.steps, pred), flush=True)
+                  'updates: {:6d}, correct: {:.2f}, label: {}'.format(n_seq, opt.lr, ppl, opt.steps, pred, label), flush=True)
             prints += n_print
             p_loss, p_token, p_correct = 0., 0, 0
 
