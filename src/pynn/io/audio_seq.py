@@ -66,12 +66,13 @@ class SpectroDataset(Dataset):
             if self.use_addinfo:
                 info_file = os.path.join(scp_dir, f"{scp_name}.add_info")
                 for line in smart_open(info_file, 'r'):
-                    tokens = line.replace('\n','').split(' ')
+                    tokens = line.strip().split()
                     self.addinfo_dct[tokens[0]] = [t.lower() for t in tokens[1:]]
             else:
                 for line in smart_open(scp_set, 'r'):
                     tokens = line.replace('\n','').split(' ')
                     self.addinfo_dct[tokens[0]] = []
+        print(f'Loaded {len(self.addinfo_dct)} info lines')
 
     def partition(self, rank, parts):
         self.rank = rank
