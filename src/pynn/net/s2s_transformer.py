@@ -15,7 +15,7 @@ class Encoder(nn.Module):
     def __init__(self, d_input, d_model, n_layer, n_head, d_inner,
             attn_mode=0, rel_pos=False, dropout=0.1, layer_drop=0.,
             embedding=False, emb_vocab=0, emb_drop=0.,
-            time_ds=1, use_cnn=False, freq_kn=3, freq_std=2):
+            time_ds=1, use_cnn=False, freq_kn=3, freq_std=2,adapter_names=None,d_adapter=512):
         super().__init__()
 
         if embedding:
@@ -39,7 +39,7 @@ class Encoder(nn.Module):
         self.rel_pos = rel_pos
 
         self.layer_stack = nn.ModuleList([
-            EncoderLayer(d_model, d_inner, n_head, dropout, rel_pos=rel_pos)
+            EncoderLayer(d_model, d_inner, n_head, dropout, rel_pos=rel_pos,adapter_names=adapter_names,d_adapter=d_adapter)
             for _ in range(n_layer)])
 
         self.layer_norm = nn.LayerNorm(d_model)
@@ -59,7 +59,7 @@ class Encoder(nn.Module):
 
         return slf_mask
 
-    def forward(self, src_seq, src_mask):
+    def forward(self, src_seq, src_mask, adapter=None):
         # -- Forward
         if self.emb is not None:
             src_seq = self.emb_drop(self.emb(src_seq))
@@ -90,6 +90,7 @@ class Encoder(nn.Module):
         # -- Prepare masks
         slf_mask = self.get_mask(self.attn_mode, src_mask)
 
+        enc_out = self.layer_norm(enc_out)
         nl = len(self.layer_stack)
         for l, enc_layer in enumerate(self.layer_stack):
             scale = 1.
@@ -100,14 +101,13 @@ class Encoder(nn.Module):
             
             enc_out = (enc_out, pos_emb) if self.rel_pos else enc_out
             enc_out = enc_layer(
-                enc_out, slf_mask=slf_mask, scale=scale)
+                enc_out, slf_mask=slf_mask, scale=scale, adapter=adapter)
             
-        enc_out = self.layer_norm(enc_out)
         return enc_out, src_mask
 
 class Decoder(nn.Module):
     def __init__(self, n_vocab, d_model, n_layer, n_head, d_inner,
-            rel_pos=False, dropout=0.1, emb_drop=0., layer_drop=0., shared_emb=True):
+            rel_pos=False, dropout=0.1, emb_drop=0., layer_drop=0., shared_emb=True,adapter_names=None,d_adapter=512):
 
         super().__init__()
 
@@ -118,7 +118,7 @@ class Decoder(nn.Module):
         self.rel_pos = rel_pos
         
         self.layer_stack = nn.ModuleList([
-            DecoderLayer(d_model, d_inner, n_head, dropout, rel_pos=rel_pos)
+            DecoderLayer(d_model, d_inner, n_head, dropout, rel_pos=rel_pos,adapter_names=adapter_names,d_adapter=d_adapter)
             for _ in range(n_layer)])
 
         self.output = nn.Linear(d_model, n_vocab, bias=True)
@@ -128,7 +128,7 @@ class Decoder(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         self.layer_drop = layer_drop
             
-    def forward(self, tgt_seq, enc_out, enc_mask):
+    def forward(self, tgt_seq, enc_out, enc_mask,adapter=None):
         # -- Forward
         dec_out = self.emb(tgt_seq) * self.scale
         if self.rel_pos:
@@ -150,6 +150,7 @@ class Decoder(nn.Module):
 
         attn_mask = enc_mask.eq(0).unsqueeze(1).expand(-1, lt, -1)
 
+        dec_out = self.layer_norm(dec_out)
         attn = None
         nl = len(self.layer_stack)
         for l, dec_layer in enumerate(self.layer_stack):
@@ -162,9 +163,8 @@ class Decoder(nn.Module):
             dec_out = (dec_out, pos_emb) if self.rel_pos else dec_out
             dec_out, attn = dec_layer(
                 dec_out, enc_out, slf_mask=slf_mask,
-                dec_enc_mask=attn_mask, scale=scale)
+                dec_enc_mask=attn_mask, scale=scale,adapter=adapter)
                         
-        dec_out = self.layer_norm(dec_out)
         dec_out = self.output(dec_out)
         
         return dec_out, attn
@@ -176,7 +176,7 @@ class Transformer(nn.Module):
             n_enc=8, n_enc_head=8, n_dec=4, n_dec_head=8,
             time_ds=1, use_cnn=False, freq_kn=3, freq_std=2,
             dropout=0.1, emb_drop=0., enc_drop=0.0, dec_drop=0.0,
-            shared_emb=False, rel_pos=False):
+            shared_emb=False, rel_pos=False,adapter_names=None,d_adapter=512):
 
         super().__init__()
 
@@ -185,32 +185,32 @@ class Transformer(nn.Module):
             n_layer=n_enc, n_head=n_enc_head, rel_pos=rel_pos,
             embedding=(n_emb>0), emb_vocab=n_emb, emb_drop=emb_drop,
             time_ds=time_ds, use_cnn=use_cnn, freq_kn=freq_kn, freq_std=freq_std,
-            dropout=dropout, layer_drop=enc_drop)
+            dropout=dropout, layer_drop=enc_drop,adapter_names=adapter_names,d_adapter=d_adapter)
 
         self.decoder = Decoder(
             n_vocab, d_model=d_model, d_inner=d_inner, n_layer=n_dec,
             n_head=n_dec_head, shared_emb=shared_emb, rel_pos=False,
-            dropout=dropout, emb_drop=emb_drop, layer_drop=dec_drop)
+            dropout=dropout, emb_drop=emb_drop, layer_drop=dec_drop,adapter_names=adapter_names,d_adapter=d_adapter)
 
-    def forward(self, src_seq, src_mask, tgt_seq, encoding=True):
+    def forward(self, src_seq, src_mask, tgt_seq, encoding=True,adapter=None):
         if encoding:
             enc_out, enc_mask = self.encoder(src_seq, src_mask)
         else:
             enc_out, enc_mask = src_seq, src_mask
-        dec_out = self.decoder(tgt_seq, enc_out, enc_mask)[0]
+        dec_out = self.decoder(tgt_seq, enc_out, enc_maskadapter=adapter)[0]
         return dec_out, enc_out, enc_mask
         
-    def encode(self, src_seq, src_mask):
-        return self.encoder(src_seq, src_mask)
+    def encode(self, src_seq, src_mask,adapter=None):
+        return self.encoder(src_seq, src_mask,adapter=adapter)
 
-    def decode(self, enc_out, enc_mask, tgt_seq):
-        dec_out, attn = self.decoder(tgt_seq, enc_out, enc_mask)
+    def decode(self, enc_out, enc_mask, tgt_seq,adapter=None):
+        dec_out, attn = self.decoder(tgt_seq, enc_out, enc_mask,adapter=adapter)
         dec_out = dec_out[:,-1,:].squeeze(1)
         return torch.log_softmax(dec_out, -1), attn
 
-    def coverage(self, enc_out, enc_mask, tgt_seq, attn=None):
+    def coverage(self, enc_out, enc_mask, tgt_seq, attn=None,adapter=None):
         if attn is None:
-            attn = self.decoder(tgt_seq, enc_out, enc_mask)[1]
+            attn = self.decoder(tgt_seq, enc_out, enc_mask,adapter=adapter)[1]
         attn = attn.mean(dim=1).sum(dim=1)
         cov = attn.gt(0.5).float().sum(dim=1)
         return cov

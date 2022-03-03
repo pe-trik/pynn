@@ -127,7 +127,6 @@ class MultiHeadedAttention(nn.Module):
 
     def forward(self, query, key=None, mask=None, scale=1.):
         residual = query if self.residual else None
-        query = self.norm(query)
         if key is None: key = query
         value = key
 
@@ -137,6 +136,7 @@ class MultiHeadedAttention(nn.Module):
         x, attn = self.forward_attention(v, scores, mask)
         x = self.drop(x) * scale
         x = x if residual is None else (x + residual)
+        x = self.norm(x)
         return x, attn
 
 
@@ -164,7 +164,6 @@ class RelPositionAttention(MultiHeadedAttention):
     def forward(self, query_pos, key=None, mask=None, scale=1.):
         query, pos_emb = query_pos
         residual = query if self.residual else None
-        query = self.norm(query) 
         if key is None: key = query
         value = key
 
@@ -195,5 +194,6 @@ class RelPositionAttention(MultiHeadedAttention):
         x, attn = self.forward_attention(v, scores, mask)
         x = self.drop(x) * scale
         x = x if residual is None else (x + residual)
+        x = self.norm(x) 
         return x, attn
 

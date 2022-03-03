@@ -14,14 +14,17 @@ from torch.utils.data import DataLoader
 from . import smart_open
  
 class SpectroDataset(Dataset):
-    def __init__(self, scp_path, label_path=None, paired_label=False,
+    def __init__(self, scp_paths, label_paths=None, use_addinfo=False, paired_label=False, batch_by=-1,
                  verbose=True, sek=True, sort_src=False, pack_src=False,
                  downsample=1, preload=False, threads=4, fp16=False, 
                  spec_drop=False, spec_bar=2, spec_ratio=0.4,
                  time_stretch=False, time_win=10000, mean_sub=False, var_norm=False):
-        self.scp_path = scp_path     # path to the .scp file
-        self.label_path = label_path # path to the label file
+        self.scp_paths = [p.strip() for p in scp_paths.split(',') if len(p.strip()) > 0]     # path to the .scp file
+        self.label_paths = [p.strip() for p in label_paths.split(',') if len(p.strip()) > 0] # path to the label file
         self.paired_label = paired_label
+        
+        self.use_addinfo = use_addinfo
+        self.batch_by = batch_by
 
         self.downsample = downsample
         self.sort_src = sort_src
@@ -51,6 +54,26 @@ class SpectroDataset(Dataset):
         self.parts = 1
         self.epoch = -1
 
+        self.addinfo_dct = {}
+        self.__load_addinfos()
+
+    def __load_addinfos(self):
+        for scp_path in self.scp_paths:
+            path = os.path.dirname(scp_path)
+            scp_dir = path + '/' if path != '' else ''
+            scp_set = scp_path.rsplit('/',1)[-1]
+            scp_name = scp_set.split('.')[0]
+            if self.use_addinfo:
+                info_file = os.path.join(scp_dir, f"{scp_name}.add_info")
+                for line in smart_open(info_file, 'r'):
+                    tokens = line.strip().split()
+                    self.addinfo_dct[tokens[0]] = [t.lower() for t in tokens[1:]]
+            else:
+                for line in smart_open(scp_set, 'r'):
+                    tokens = line.replace('\n','').split(' ')
+                    self.addinfo_dct[tokens[0]] = []
+        print(f'Loaded {len(self.addinfo_dct)} info lines')
+
     def partition(self, rank, parts):
         self.rank = rank
         self.parts = parts
@@ -65,47 +88,69 @@ class SpectroDataset(Dataset):
         if self.utt_lbl is not None:
             return
 
-        path = os.path.dirname(self.scp_path)
-        scp_dir = path + '/' if path != '' else ''
-
         utts = {}
-        for line in smart_open(self.scp_path, 'r'):
-            if line.startswith('#'): continue
-            tokens = line.replace('\n','').split(' ')
-            utt_id, path_pos = tokens[0:2]
-            utt_len = -1 if len(tokens)<=2 else int(tokens[2])
-            path, pos = path_pos.split(':')
-            path = path if path.startswith('/') else scp_dir + path
-            utts[utt_id] = (utt_id, path, pos, utt_len)
- 
-        labels = {}
-        for line in smart_open(self.label_path, 'r'):
-            tokens = line.split()
-            utt_id = tokens[0]
-            if utt_id == '' or utt_id not in utts: continue
+        for scp_path in self.scp_paths:
+            path = scp_path
+            path = os.path.dirname(path)
+            scp_dir = path + '/' if path != '' else ''
+            for line in smart_open(scp_path, 'r'):
+                if line.startswith('#'): continue
+                tokens = line.replace('\n','').split(' ')
+                utt_id, path_pos = tokens[0:2]
+                utt_len = -1 if len(tokens)<=2 else int(tokens[2])
+                path, pos = path_pos.split(':')
+                path = path if path.startswith('/') else scp_dir + path
+                if self.addinfo_dct.get(utt_id, None) == None: continue
+                utts[utt_id] = (utt_id, path, pos, utt_len, self.addinfo_dct[utt_id])
 
-            if self.paired_label:
-                sp = tokens.index('|', 1)
-                lb1 = [int(token) for token in tokens[1:sp]]
-                lb1 = [1] + [el+2 for el in lb1] + [2] if self.sek else lb1
-                lb2 = [int(token) for token in tokens[sp+1:]]
-                lb2 = [1] + [el+2 for el in lb2] + [2] if self.sek else lb2
-                lbl = (lb1, lb2)
-            else:
-                lbl = [int(token) for token in tokens[1:]]
-                lbl = [1] + [el+2 for el in lbl] + [2] if self.sek else lbl
-            labels[utt_id] = lbl
+        labels = {}
+        used_label_paths = set()
+        for label_path in self.label_paths:
+            if label_path in used_label_paths: continue
+            used_label_paths.add(label_path)
+            for line in smart_open(label_path, 'r'):
+                tokens = line.split()
+                utt_id = tokens[0]
+                if utt_id == '' or utt_id not in utts: continue
+
+                if self.paired_label:
+                    sp = tokens.index('|', 1)
+                    lb1 = [int(token) for token in tokens[1:sp]]
+                    lb1 = [1] + [el+2 for el in lb1] + [2] if self.sek else lb1
+                    lb2 = [int(token) for token in tokens[sp+1:]]
+                    lb2 = [1] + [el+2 for el in lb2] + [2] if self.sek else lb2
+                    lbl = (lb1, lb2)
+                else:
+                    lbl = [int(token) for token in tokens[1:]]
+                    lbl = [1] + [el+2 for el in lbl] + [2] if self.sek else lbl
+                labels[utt_id] = lbl
 
         utt_lbl = []
+        batch_utts = {}
         for utt_id, utt_info in utts.items():
             if utt_id not in labels: continue
             utt_lbl.append([*utt_info, labels[utt_id]])
+            if self.batch_by != -1:
+                batch_by_inf = utt_info[4][self.batch_by]
+                if batch_by_inf in batch_utts:
+                    batch_utts[batch_by_inf].append([*utt_info, labels[utt_id]])
+                else:
+                    batch_utts[batch_by_inf] = [[*utt_info, labels[utt_id]]]
+
         self.utt_lbl = utt_lbl
         self.print('%d label sequences loaded.' % len(self.utt_lbl))
         self.print('Creating batches.. ', end='')
-        self.batches = self.create_batch(b_input, b_sample)
-        self.print('Done.')
-        
+        self.batches = []
+        self.batch_num_offset = 0
+        if len(batch_utts.keys()) > 0:
+            for _, batch_items in batch_utts.items():
+                self.batches += self.create_batch(b_input, b_sample, batch_items)
+        else:
+            self.batches = self.create_batch(b_input, b_sample)
+
+
+        self.print('Done.')   
+     
         if self.preload:
             self.print('Loading ark files.. ', end='')
             self.preload_feats()
@@ -124,8 +169,9 @@ class SpectroDataset(Dataset):
                             num_workers=self.threads, pin_memory=False)
         return loader
 
-    def create_batch(self, b_input, b_sample):
-        utts = self.utt_lbl
+    def create_batch(self, b_input, b_sample, batched_by=None):
+        utts = batched_by if batched_by else self.utt_lbl
+
         for utt in utts:
             path, pos, utt_len = utt[1:4]
             if utt_len < 0: utt[3] = self._read_length(path, pos, cache=True)
@@ -142,10 +188,11 @@ class SpectroDataset(Dataset):
                 j += step
                 continue
             if bs > 8: j = s + (bs // 8) * 8
-            batches.append([idx for idx, _ in lst[s:j]])
+            batches.append([idx+self.batch_num_offset for idx, _ in lst[s:j]])
             s = j
             j += step
-        if s < len(lst): batches.append([idx for idx, _ in lst[s:]])
+        if s < len(lst): batches.append([idx+self.batch_num_offset for idx, _ in lst[s:]])
+        self.batch_num_offset += len(lst)
         return batches
 
     def preload_feats(self):
@@ -222,9 +269,9 @@ class SpectroDataset(Dataset):
         return len(self.utt_lbl)
 
     def __getitem__(self, index):
-        utt_id, path, pos, _, lbl  = self.utt_lbl[index]
+        utt_id, path, pos, _, addinfos, lbl  = self.utt_lbl[index]
         utt_mat = self.read_mat_cache(utt_id, path, pos)
-        return (utt_mat, lbl)
+        return (utt_mat, lbl, addinfos)
 
     def read_mat_cache(self, utt_id, path, pos):
         cache = self.ark_cache
@@ -370,7 +417,7 @@ class SpectroDataset(Dataset):
         return (*labels,) 
 
     def collate_fn(self, batch):
-        src, tgt = zip(*batch)
+        src, tgt, addinfos = zip(*batch)
         src = self.augment_src(src)
 
         if self.sort_src or self.pack_src:
@@ -380,4 +427,4 @@ class SpectroDataset(Dataset):
         src = self.collate_src(src) if not self.pack_src else self.collate_src_pack(src)
         tgt = self.collate_tgt(tgt)
 
-        return (*src, *tgt)
+        return (*src, *tgt, addinfos)

@@ -1,6 +1,7 @@
 # Copyright 2019 Thai-Son Nguyen
 # Licensed under the Apache License, Version 2.0 (the "License")
 
+from ast import arg
 from pynn.io.audio_seq import SpectroDataset
 from pynn.io.text_seq import TextSeqDataset, TextPairDataset
 from pynn.trainer.adam_s2s import train_model as train_s2s
@@ -18,14 +19,24 @@ def print_model(model):
     
 def train_s2s_model(model, args, device, n_device=1):
     dist, verbose = n_device > 1, device == 0
-    tr_data = SpectroDataset(args.train_scp, args.train_target, downsample=args.downsample,
+    tr_data = SpectroDataset(args.train_scps, args.train_targets, downsample=args.downsample, 
+                             batch_by=args.batch_by, use_addinfo=args.use_addinfo,
                              sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,
                              spec_drop=args.spec_drop, spec_bar=args.spec_bar, spec_ratio=args.spec_ratio,
                              time_stretch=args.time_stretch, time_win=args.time_win,
                              fp16=args.fp16, preload=args.preload, threads=2, verbose=verbose)
-    cv_data = SpectroDataset(args.valid_scp, args.valid_target, downsample=args.downsample,
+    cv_data = {}
+    for valid_scp in args.valid_scps.split(','):
+        if len(valid_scp.strip()) > 0:
+            cv_data[valid_scp] = SpectroDataset(valid_scp, args.valid_targets, downsample=args.downsample,
+                                batch_by=args.batch_by, use_addinfo=args.use_addinfo,
+                                sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,
+                                fp16=args.fp16, preload=args.preload, threads=2, verbose=verbose)
+    if args.cv_cs:
+        cv_data["codeswitch"] = SpectroDataset(args.valid_scps, args.valid_targets, downsample=args.downsample,
                              sort_src=True, mean_sub=args.mean_sub, var_norm=args.var_norm,
                              fp16=args.fp16, preload=args.preload, threads=2, verbose=verbose)
+     
     if dist: tr_data.partition(device, n_device)
     n_print = args.n_print // n_device
     b_update = args.b_update // n_device
@@ -36,7 +47,7 @@ def train_s2s_model(model, args, device, n_device=1):
            'n_warmup': args.n_warmup, 'n_const': args.n_const, 'n_save': args.n_save, 'n_print': n_print,
            'b_input': args.b_input, 'b_sample': args.b_sample, 'b_update': b_update, 'b_sync': args.b_sync}
     datasets = (tr_data, cv_data)
-    train_s2s(model, datasets, args.n_epoch, device, cfg, fp16=args.fp16, dist=dist)
+    train_s2s(model, datasets, args.n_epoch, device, cfg, args, fp16=args.fp16, dist=dist)
 
 def train_ctc_model(model, args, device, n_device=1):
     dist, verbose = n_device > 1, device == 0
