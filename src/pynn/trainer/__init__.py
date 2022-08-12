@@ -26,7 +26,7 @@ class ScheduledOptim():
             betas=(0.9, 0.98), eps=1e-09, weight_decay=0, dist=False):
         model = model.to(device)
         self.params = filter(lambda x: x.requires_grad, model.parameters()) if params is None else params
-        self.optim = optim.Adam(self.params, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.optim = optim.AdamW(self.params, betas=betas, eps=eps, weight_decay=weight_decay)
         self.scaler = GradScaler()
         if dist:
             from torch.nn.parallel import DistributedDataParallel as DDP
