@@ -70,6 +70,8 @@ parser.add_argument('--lr', help='learning rate', type=float, default=0.0012)
 parser.add_argument('--grad-norm', help='divide gradient by updated tokens', action='store_true')
 parser.add_argument('--fp16', help='fp16 or not', action='store_true')
 
+parser.add_argument('--port', type=int, default=12355)
+
 def create_model(args, device):
     n_enc_head = args.n_head if args.n_enc_head==0 else args.n_enc_head
     params = {
@@ -102,7 +104,7 @@ def train(device, args):
 
 def train_distributed(device, gpus, args):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = str(args.port)
     dist.init_process_group("nccl", rank=device, world_size=gpus)
     torch.manual_seed(0)
 
