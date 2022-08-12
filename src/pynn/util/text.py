@@ -61,11 +61,14 @@ def load_label(label_path):
     return dic
 
 def parse_time_info(utt):
-    stime, etime =  utt.split('-')[-2:]
-    conv = utt[:-len(stime)-len(etime)-2]
-    stime = stime[:-2].lstrip('0') + '.' + stime[-2:]
-    etime = etime[:-2].lstrip('0') + '.' + etime[-2:]
-    return (conv, stime, etime)
+    try:
+        stime, etime =  utt.split('-')[-2:]
+        conv = utt[:-len(stime)-len(etime)-2]
+        stime = stime[:-2].lstrip('0') + '.' + stime[-2:]
+        etime = etime[:-2].lstrip('0') + '.' + etime[-2:]
+        return (utt, stime, etime)
+    except:
+        return (utt, '0', '0')
 
 def token2word(tokens, scores, dic, word_dic=None, space=''):
     hypo = []
