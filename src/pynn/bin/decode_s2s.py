@@ -74,7 +74,7 @@ if __name__ == '__main__':
             hypos, scores = decode_func(model, seq, mask, device, args.beam_size,
                                         args.max_len, len_norm=args.len_norm,
                                         coverage=args.coverage, lm=lm, lm_scale=args.lm_scale)
-            hypos, scores = hypos.tolist(), scores.tolist()
+            hypos, scores = hypos, scores
             write_hypo(hypos, scores, fout, utts, dic, word_dic, args.space, args.format)
     fout.close()
     time_elapsed = time.time() - since

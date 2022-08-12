@@ -182,11 +182,15 @@ def partial_search_multi(model, src, max_node=8, max_len=10, states=[1], len_nor
     return enc_out, enc_mask, hypo, prob, sth
 
 def beam_search(model, src_seq, src_mask, device, max_node=10, max_len=200, 
-        init_state=[1], len_norm=False, coverage=0., lm=None, lm_scale=0.5):
+        init_state=[1], len_norm=False, coverage=0., lm=None, lm_scale=0.5, init_states=None):
     batch_size = src_seq.size(0)
     enc_out, enc_mask = model.encode(src_seq, src_mask)[0:2]
 
-    beams = [Beam(max_node, init_state, len_norm) for i in range(batch_size)]
+    if init_states != None:
+        beams = [Beam(max_node, init_state, len_norm) for init_state in init_states]
+    else:
+        beams = [Beam(max_node, init_state, len_norm) for i in range(batch_size)]
+
     for step in range(max_len):
         l = 1 if step == 0 else max_node
         for k in range(l):
@@ -214,21 +218,25 @@ def beam_search(model, src_seq, src_mask, device, max_node=10, max_len=200,
             br = False if not beam.done else br
         if br: break
 
-    tokens = np.zeros((batch_size, step), dtype="int32")
-    probs = np.zeros((batch_size, step), dtype="float32")
+    tokens = []
+    probs = []
     for i, beam in enumerate(beams):
         hypo, prob = beam.best()
-        tokens[i,:] = hypo[1:step+1]
-        probs[i,:] = prob[1:step+1]
+        tokens.append(hypo[1:])
+        probs.append(prob[1:])
 
     return tokens, probs
 
 def beam_search_cache(model, src_seq, src_mask, device, max_node=10, max_len=200, 
-        init_state=[1], len_norm=False, coverage=0., lm=None, lm_scale=0.5):
+        init_state=[1], len_norm=False, coverage=0., lm=None, lm_scale=0.5, init_states=None):
     batch_size = src_seq.size(0)
+
     enc_out, enc_mask = model.encode(src_seq, src_mask)[0:2]
 
-    beams = [Beam(max_node, init_state, len_norm) for i in range(batch_size)]
+    if init_states != None:
+        beams = [Beam(max_node, init_state, len_norm) for init_state in init_states]
+    else:
+        beams = [Beam(max_node, init_state, len_norm) for i in range(batch_size)]
     for step in range(max_len):
         l = 1 if step == 0 else max_node
         for k in range(l):
@@ -262,12 +270,12 @@ def beam_search_cache(model, src_seq, src_mask, device, max_node=10, max_len=200
             br = False if not beam.done else br
         if br: break
 
-    tokens = np.zeros((batch_size, step), dtype="int32")
-    probs = np.zeros((batch_size, step), dtype="float32")
+    tokens = []
+    probs = []
     for i, beam in enumerate(beams):
         hypo, prob = beam.best()
-        tokens[i,:] = hypo[1:step+1]
-        probs[i,:] = prob[1:step+1]
+        tokens.append(hypo[1:])
+        probs.append(prob[1:])
 
     return tokens, probs
 
