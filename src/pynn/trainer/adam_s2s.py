@@ -133,10 +133,11 @@ def train_model(model, datasets, epochs, device, cfg, fp16=False, dist=False):
     b_sync = cfg.get('b_sync', 0)
 
     n_save = cfg.get('n_save', 5)
+    adam = cfg.get('adam', False)
     n_print = 0 if dist and device > 0 else n_print
 
     opt = ScheduledOptim(n_warmup, n_const, lr)
-    model_opt = opt.initialize(model, device, weight_decay=weight_decay, dist=dist)
+    model_opt = opt.initialize(model, device, weight_decay=weight_decay, dist=dist, adam=adam)
 
     tr_data, cv_dat = datasets
     pool = EpochPool(n_save)

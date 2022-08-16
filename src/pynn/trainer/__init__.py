@@ -23,10 +23,11 @@ class ScheduledOptim():
         self.lr = 0.
 
     def initialize(self, model, device, params=None,
-            betas=(0.9, 0.98), eps=1e-09, weight_decay=0, dist=False):
+            betas=(0.9, 0.98), eps=1e-09, weight_decay=0, dist=False, adam=False):
         model = model.to(device)
         self.params = filter(lambda x: x.requires_grad, model.parameters()) if params is None else params
-        self.optim = optim.AdamW(self.params, betas=betas, eps=eps, weight_decay=weight_decay)
+        opt = optim.Adam if adam else optim.AdamW
+        self.optim = opt(self.params, betas=betas, eps=eps, weight_decay=weight_decay)
         self.scaler = GradScaler()
         if dist:
             from torch.nn.parallel import DistributedDataParallel as DDP
@@ -35,7 +36,7 @@ class ScheduledOptim():
 
     def apply_weight_noise(self):
         with torch.no_grad():
-            for p in self.params: p.add_(torch.normal(0,  0.075, param.size())) 
+            for p in self.params: p.add_(torch.normal(0,  0.075, p.size())) 
 
     def backward(self, loss):
         self.scaler.scale(loss).backward()

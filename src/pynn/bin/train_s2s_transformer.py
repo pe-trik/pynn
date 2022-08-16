@@ -70,6 +70,7 @@ parser.add_argument('--lr', help='learning rate', type=float, default=0.0012)
 parser.add_argument('--grad-norm', help='divide gradient by updated tokens', action='store_true')
 parser.add_argument('--fp16', help='fp16 or not', action='store_true')
 
+parser.add_argument('--adam', help='Use Adam instead of AdamW', action='store_true', default=False)
 parser.add_argument('--port', type=int, default=12355)
 
 def create_model(args, device):
