@@ -36,6 +36,7 @@ class SpectroDataset(Dataset):
         self.time_stretch = time_stretch
         self.time_win = time_win
         self.fp16 = fp16
+        self.fmin = np.finfo(np.float16 if fp16 else np.float32).eps
 
         self.threads = threads
         self.preload = preload
@@ -312,7 +313,7 @@ class SpectroDataset(Dataset):
         return inst - inst.mean(axis=0, keepdims=True)
 
     def std_norm_inst(self, inst):
-        return (inst - inst.mean(axis=0, keepdims=True)) / inst.std(axis=0, keepdims=True)
+        return (inst - inst.mean(axis=0, keepdims=True)) / np.maximum(inst.std(axis=0, keepdims=True), self.fmin)
 
     def down_sample_inst(self, feats, cf=4):
         feats = feats[:(feats.shape[0]//cf)*cf,:]
